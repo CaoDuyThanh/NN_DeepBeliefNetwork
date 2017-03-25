@@ -17,7 +17,7 @@ VISUALIZE_FREQUENCY = 5000
 
 # NETWORKS HYPER PARAMETERS
 HIDDEN_LAYERS_SIZES = [1000, 1000, 1000]
-NUM_CHAINS = 15
+NUM_CHAINS = 1
 NUM_OUT = 10
 
 # PRETRAIN HYPER PARAMETERS
@@ -92,7 +92,6 @@ def DBN():
             numVisible   = inputSize,
             numHidden    = HIDDEN_LAYERS_SIZES[idx],
             learningRate = LearningRate,
-            persistent   = persistentChain,
             kGibbsSample = NUM_CHAINS
         )
 
@@ -104,10 +103,14 @@ def DBN():
             numIn        = inputSize,
             numOut       = HIDDEN_LAYERS_SIZES[idx],
             W            = rbm.W,
-            b            = rbm.hBias
+            b            = rbm.hBias,
+            activation   = T.nnet.sigmoid
         )
         hiddenLayers.append(hiddenLayer)
+
     # Create last layer
+    W = theano.shared(numpy.zeros((HIDDEN_LAYERS_SIZES[-1], NUM_OUT), dtype='float32'),
+                      borrow=True)
     inputSize = HIDDEN_LAYERS_SIZES[-1]
     layerInput = hiddenLayers[-1].Output
     hiddenLayer = HiddenLayer(
@@ -115,7 +118,8 @@ def DBN():
         input        = layerInput,
         numIn        = inputSize,
         numOut       = NUM_OUT,
-        activation   = T.nnet.softmax
+        activation   = T.nnet.softmax,
+        W            = W
     )
     hiddenLayers.append(hiddenLayer)
 
@@ -154,18 +158,18 @@ def DBN():
             Y: trainSetY[Index * BATCH_SIZE: (Index + 1) * BATCH_SIZE],
         }
     )
-    # Test function
-    pred = T.argmax(output)
+    # Valid function
+    pred = T.argmax(output, axis = 1)
     error = CostFHelper.Error(pred, Y)
-    testFunc = theano.function(
+    validFunc = theano.function(
         inputs  = [Index],
         outputs = [error],
         givens  = {
-            X: testSetX[Index * BATCH_SIZE: (Index + 1) * BATCH_SIZE],
-            Y: testSetY[Index * BATCH_SIZE: (Index + 1) * BATCH_SIZE],
+            X: validSetX[Index * BATCH_SIZE: (Index + 1) * BATCH_SIZE],
+            Y: validSetY[Index * BATCH_SIZE: (Index + 1) * BATCH_SIZE],
         }
     )
-    fineTuningFunc = [trainFunc, testFunc]
+    fineTuningFunc = [trainFunc, validFunc]
 
     #########################################
     #      PRETRAINING STAGE                #
@@ -176,25 +180,35 @@ def DBN():
         [rbmLayer.LoadModel(file) for rbmLayer in rbmLayers]
         file.close()
 
+    shape = [(28, 28), (50, 20), (50, 20)]
+
     print ('Start pre-training stage....')
     iter = 0
     costRbm = []
     for idx, rbmLayerFunc in enumerate(rbmLayerFuncs):
         print ('Train layer %d ' % (idx))
         for epoch in range(PRETRAINING_EPOCH):
+            image = Image.fromarray(tile_raster_images(
+                X=rbmLayers[idx].Params[0].get_value(borrow=True).T,
+                img_shape=shape[idx], tile_shape=(10, 10),
+                tile_spacing=(1, 1)))
+            image.save('filters_corruption_30_%d.png' % (idx))
+
             for trainBatchIdx in range(nTrainBatchs):
                 iter += BATCH_SIZE
                 costAELayer = rbmLayerFunc[0](trainBatchIdx, PRETRAINING_LEARNING_RATE)
+                costRbm.append(costAELayer[0])
 
                 if iter % VISUALIZE_FREQUENCY == 0:
-                    print ('Epoch = %d, iteration = %d ' % (epoch, iter))
-                    print ('      CostRBMLayer = %f ' % (costAELayer[0]))
+                    print ('      Epoch = %d, iteration = %d, CostRBMLayer = %f ' % (epoch, iter, numpy.mean(costRbm)))
+                    costRbm = []
 
-                if iter % PRETRAINING_SAVE_FREQUENCY == 0:
-                    file = open(PRETRAINING_SAVE_PATH, 'wb')
-                    [rbmLayer.SaveModel(file) for rbmLayer in rbmLayers]
-                    file.close()
-                    print('Save model !')
+            file = open(PRETRAINING_SAVE_PATH, 'wb')
+            [rbmLayer.SaveModel(file) for rbmLayer in rbmLayers]
+            file.close()
+            print('      Save model !')
+
+
 
         # Save after training layer
         file = open(PRETRAINING_SAVE_PATH, 'wb')
@@ -222,27 +236,32 @@ def DBN():
 
     # Training
     print ('Start fine-tuning stage...')
+    costs = []
+    bestError = 1
     for epoch in range(FINETUNING_EPOCH):
-        iter += BATCH_SIZE
-        cost = fineTuningFunc[0](trainBatchIdx, FINETUNING_LEARNING_RATE)
+        for trainBatchIdx in range(nTrainBatchs):
+            iter += BATCH_SIZE
+            cost = fineTuningFunc[0](trainBatchIdx, FINETUNING_LEARNING_RATE)
+            costs.append(cost[0])
 
-        if iter % VISUALIZE_FREQUENCY == 0:
-            print ('Epoch = %d, iteration = %d ' % (epoch, iter))
-            print ('      Cost fine-tuning = %f ' % (cost[0]))
+            if iter % VISUALIZE_FREQUENCY == 0:
+                print ('Epoch = %d, iteration = %d ' % (epoch, iter))
+                print ('      Cost fine-tuning = %f ' % (numpy.mean(costs)))
+                costs = []
 
-        if iter % VALIDATION_FREQUENCY == 0:
-            validError = 0
-            print ('Validate current model ')
-            for validBatchIdx in range(nValidBatchs):
-                validError += fineTuningFunc[1](validBatchIdx)[0]
-            validError /= (nValidBatchs)
+            if iter % VALIDATION_FREQUENCY == 0:
+                validError = 0
+                print ('Validate current model ')
+                for validBatchIdx in range(nValidBatchs):
+                    validError += fineTuningFunc[1](validBatchIdx)[0]
+                validError /= (nValidBatchs)
 
-            if (validError < bestError):
-                bestError = validError
-                print ('Save model ! Sum cost = %f ' % (validError))
-                file = open(FINETUNING_SAVE_PATH, 'wb')
-                [hiddenLayer.SaveModel(file) for hiddenLayer in hiddenLayers]
-                file.close()
+                if (validError < bestError):
+                    bestError = validError
+                    print ('Save model ! Sum cost = %f ' % (validError))
+                    file = open(FINETUNING_SAVE_PATH, 'wb')
+                    [hiddenLayer.SaveModel(file) for hiddenLayer in hiddenLayers]
+                    file.close()
     print ('Start fine-tuning stage. Done!')
 
 if __name__ == '__main__':
