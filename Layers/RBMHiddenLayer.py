@@ -95,7 +95,8 @@ class RBMHiddenLayer:
                         outputs_info = [None, chainStart],
                         n_steps      = self.kGibbsSample)
         chainEnd = vSample[-1]
-        updates[self.Persistent] = hSample[-1]
+        if self.Persistent is not None:
+            updates[self.Persistent] = hSample[-1]
 
         # Calculate cost function
         self.Cost = T.mean(self.freeEnergy(self.Input)) - T.mean(self.freeEnergy(chainEnd))
